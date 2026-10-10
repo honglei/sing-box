@@ -9,6 +9,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	N "github.com/sagernet/sing/common/network"
@@ -113,6 +114,70 @@ func (s *SbStatsService) RoutedPacketConnection(ctx context.Context, conn N.Pack
 	}
 	s.access.Unlock()
 	return bufio.NewInt64CounterPacketConn(conn, readCounter, nil, writeCounter, nil)
+}
+
+func (s *SbStatsService) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
+	inbound := metadata.Inbound
+	user := metadata.User
+	outbound := matchOutbound.Tag()
+	var uplink []*atomic.Int64
+	var downlink []*atomic.Int64
+	countInbound := inbound != "" && s.inbounds[inbound]
+	countOutbound := outbound != "" && s.outbounds[outbound]
+	countUser := user != "" && s.users[user]
+	if !countInbound && !countOutbound && !countUser {
+		return nil
+	}
+	s.access.Lock()
+	if countInbound {
+		uplink = append(uplink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
+	}
+	if countOutbound {
+		uplink = append(uplink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
+	}
+	if countUser {
+		uplink = append(uplink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
+		downlink = append(downlink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
+	}
+	s.access.Unlock()
+	return newSbFlowTracker(uplink, downlink)
+}
+
+type sbFlowTracker struct {
+	uplink   []*atomic.Int64
+	downlink []*atomic.Int64
+	handle   tun.FlowHandle
+}
+
+func newSbFlowTracker(uplink []*atomic.Int64, downlink []*atomic.Int64) *sbFlowTracker {
+	return &sbFlowTracker{uplink: uplink, downlink: downlink}
+}
+
+func (t *sbFlowTracker) AttachFlow(handle tun.FlowHandle) {
+	t.handle = handle
+}
+
+func (t *sbFlowTracker) CountForward(n int) {
+	for _, c := range t.uplink {
+		c.Add(int64(n))
+	}
+}
+
+func (t *sbFlowTracker) CountReverse(n int) {
+	for _, c := range t.downlink {
+		c.Add(int64(n))
+	}
+}
+
+func (t *sbFlowTracker) FlowEstablished() {
+}
+
+func (t *sbFlowTracker) CloseFlow(reason tun.FlowCloseReason) {
+	if t.handle != nil {
+		t.handle.CloseFlow()
+	}
 }
 
 func (s *SbStatsService) GetStats(ctx context.Context, name string, reset bool) (int64, error) {
