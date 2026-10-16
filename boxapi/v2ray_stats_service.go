@@ -2,211 +2,31 @@ package boxapi
 
 import (
 	"context"
-	"net"
-	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/experimental/v2rayapi"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-tun"
-	"github.com/sagernet/sing/common/bufio"
-	E "github.com/sagernet/sing/common/exceptions"
-	N "github.com/sagernet/sing/common/network"
 )
 
+// SbStatsService preserves the Neko query API while using sing-box accounting.
 type SbStatsService struct {
-	createdAt time.Time
-	inbounds  map[string]bool
-	outbounds map[string]bool
-	users     map[string]bool
-	access    sync.Mutex
-	counters  map[string]*atomic.Int64
+	*v2rayapi.StatsService
 }
 
 func NewSbStatsService(options option.V2RayStatsServiceOptions) *SbStatsService {
-	if !options.Enabled {
+	stats := v2rayapi.NewStatsService(options)
+	if stats == nil {
 		return nil
 	}
-	inbounds := make(map[string]bool)
-	outbounds := make(map[string]bool)
-	users := make(map[string]bool)
-	for _, inbound := range options.Inbounds {
-		inbounds[inbound] = true
-	}
-	for _, outbound := range options.Outbounds {
-		outbounds[outbound] = true
-	}
-	for _, user := range options.Users {
-		users[user] = true
-	}
-	return &SbStatsService{
-		createdAt: time.Now(),
-		inbounds:  inbounds,
-		outbounds: outbounds,
-		users:     users,
-		counters:  make(map[string]*atomic.Int64),
-	}
-}
-
-func (s *SbStatsService) RoutedConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) net.Conn {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	return s.RoutedConnectionInternal(inbound, outbound, user, conn, true)
-}
-
-func (s *SbStatsService) RoutedConnectionInternal(inbound string, outbound string, user string, conn net.Conn, directIn bool) net.Conn {
-	var readCounter []*atomic.Int64
-	var writeCounter []*atomic.Int64
-	countInbound := inbound != "" && s.inbounds[inbound]
-	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
-	if !countInbound && !countOutbound && !countUser {
-		return conn
-	}
-	s.access.Lock()
-	if countInbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
-	}
-	if countOutbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
-	}
-	if countUser {
-		readCounter = append(readCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
-	}
-	s.access.Unlock()
-	if directIn {
-		conn = bufio.NewInt64CounterConn(conn, readCounter, writeCounter)
-	} else {
-		conn = bufio.NewInt64CounterConn(conn, writeCounter, readCounter)
-	}
-	return conn
-}
-
-func (s *SbStatsService) RoutedPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) N.PacketConn {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	var readCounter []*atomic.Int64
-	var writeCounter []*atomic.Int64
-	countInbound := inbound != "" && s.inbounds[inbound]
-	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
-	if !countInbound && !countOutbound && !countUser {
-		return conn
-	}
-	s.access.Lock()
-	if countInbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
-	}
-	if countOutbound {
-		readCounter = append(readCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
-	}
-	if countUser {
-		readCounter = append(readCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		writeCounter = append(writeCounter, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
-	}
-	s.access.Unlock()
-	return bufio.NewInt64CounterPacketConn(conn, readCounter, nil, writeCounter, nil)
-}
-
-func (s *SbStatsService) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
-	inbound := metadata.Inbound
-	user := metadata.User
-	outbound := matchOutbound.Tag()
-	var uplink []*atomic.Int64
-	var downlink []*atomic.Int64
-	countInbound := inbound != "" && s.inbounds[inbound]
-	countOutbound := outbound != "" && s.outbounds[outbound]
-	countUser := user != "" && s.users[user]
-	if !countInbound && !countOutbound && !countUser {
-		return nil
-	}
-	s.access.Lock()
-	if countInbound {
-		uplink = append(uplink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>uplink"))
-		downlink = append(downlink, s.loadOrCreateCounter("inbound>>>"+inbound+">>>traffic>>>downlink"))
-	}
-	if countOutbound {
-		uplink = append(uplink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>uplink"))
-		downlink = append(downlink, s.loadOrCreateCounter("outbound>>>"+outbound+">>>traffic>>>downlink"))
-	}
-	if countUser {
-		uplink = append(uplink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>uplink"))
-		downlink = append(downlink, s.loadOrCreateCounter("user>>>"+user+">>>traffic>>>downlink"))
-	}
-	s.access.Unlock()
-	return newSbFlowTracker(uplink, downlink)
-}
-
-type sbFlowTracker struct {
-	uplink   []*atomic.Int64
-	downlink []*atomic.Int64
-	handle   tun.FlowHandle
-}
-
-func newSbFlowTracker(uplink []*atomic.Int64, downlink []*atomic.Int64) *sbFlowTracker {
-	return &sbFlowTracker{uplink: uplink, downlink: downlink}
-}
-
-func (t *sbFlowTracker) AttachFlow(handle tun.FlowHandle) {
-	t.handle = handle
-}
-
-func (t *sbFlowTracker) CountForward(n int) {
-	for _, c := range t.uplink {
-		c.Add(int64(n))
-	}
-}
-
-func (t *sbFlowTracker) CountReverse(n int) {
-	for _, c := range t.downlink {
-		c.Add(int64(n))
-	}
-}
-
-func (t *sbFlowTracker) FlowEstablished() {
-}
-
-func (t *sbFlowTracker) CloseFlow(reason tun.FlowCloseReason) {
-	if t.handle != nil {
-		t.handle.CloseFlow()
-	}
+	return &SbStatsService{StatsService: stats}
 }
 
 func (s *SbStatsService) GetStats(ctx context.Context, name string, reset bool) (int64, error) {
-	s.access.Lock()
-	counter, loaded := s.counters[name]
-	s.access.Unlock()
-	if !loaded {
-		return 0, E.New(name, " not found.")
+	response, err := s.StatsService.GetStats(ctx, &v2rayapi.GetStatsRequest{
+		Name:   name,
+		Reset_: reset,
+	})
+	if err != nil {
+		return 0, err
 	}
-	var value int64
-	if reset {
-		value = counter.Swap(0)
-	} else {
-		value = counter.Load()
-	}
-	return value, nil
-}
-
-// QueryStats
-
-// GetSysStats
-
-//nolint:staticcheck
-func (s *SbStatsService) loadOrCreateCounter(name string) *atomic.Int64 {
-	counter, loaded := s.counters[name]
-	if loaded {
-		return counter
-	}
-	counter = &atomic.Int64{}
-	s.counters[name] = counter
-	return counter
+	return response.GetStat().GetValue(), nil
 }

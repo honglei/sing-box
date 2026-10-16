@@ -7,7 +7,9 @@ import (
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 func DialContext(ctx context.Context, box *box.Box, tracker adapter.ConnectionTracker, network, addr string) (net.Conn, error) {
@@ -16,8 +18,15 @@ func DialContext(ctx context.Context, box *box.Box, tracker adapter.ConnectionTr
 	if err != nil {
 		return nil, err
 	}
-	if ss, ok := tracker.(*SbStatsService); ok {
-		conn = ss.RoutedConnectionInternal("", defOutboundTag, "", conn, false)
+	if tracker != nil {
+		flow := tracker.RoutedFlow(ctx, adapter.InboundContext{}, nil, box.Outbound().Default())
+		if flow != nil {
+			// This is an outgoing socket: writes upload and reads download.
+			conn = bufio.NewCounterConn(conn,
+				[]N.CountFunc{func(n int64) { flow.CountReverse(int(n)) }},
+				[]N.CountFunc{func(n int64) { flow.CountForward(int(n)) }},
+			)
+		}
 	}
 	return conn, nil
 }
